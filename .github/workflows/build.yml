@@ -1,1 +1,185 @@
+name: Build MoonModules WLED - S3 Super Controller
 
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      - name: Check out MoonModules WLED-MM
+        uses: actions/checkout@v4
+        with:
+          repository: MoonModules/WLED-MM
+          ref: mdev
+          path: WLED-MM
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade platformio
+
+      - name: Copy GameController UART usermod
+        run: |
+          mkdir -p WLED-MM/usermods/GameControllerUART
+          cp usermods/GameControllerUART/GameControllerUART.cpp WLED-MM/usermods/GameControllerUART/
+          cp usermods/GameControllerUART/PerformancePresetPolicy.h WLED-MM/usermods/GameControllerUART/
+          cp usermods/GameControllerUART/EspNowPresetProtocol.h WLED-MM/usermods/GameControllerUART/
+          cp usermods/GameControllerUART/library.json WLED-MM/usermods/GameControllerUART/
+
+      - name: Inject GameController UART into WLED
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("WLED-MM/wled00/usermods_list.cpp")
+          text = p.read_text(encoding="utf-8")
+
+          include = '#include "../usermods/GameControllerUART/GameControllerUART.cpp"'
+          if include not in text:
+              pos = text.find('#include "wled.h"')
+              if pos == -1:
+                  raise RuntimeError('Could not find #include "wled.h"')
+              end = text.find('\n', pos)
+              if end == -1:
+                  end = len(text)
+              text = text[:end + 1] + include + '\n' + text[end + 1:]
+
+          registration = 'usermods.add(new GameControllerUART());'
+          if registration not in text:
+              match = re.search(r'(void\s+registerUsermods\s*\(\s*\)\s*\{)', text)
+              if not match:
+                  raise RuntimeError("Could not locate registerUsermods function")
+              insert_at = match.end()
+              text = text[:insert_at] + '\n  ' + registration + '\n' + text[insert_at:]
+
+          p.write_text(text, encoding="utf-8")
+          print("GameControllerUART successfully injected")
+          PY
+
+      - name: Verify GameController integration
+        run: |
+          grep -n "GameControllerUART" WLED-MM/wled00/usermods_list.cpp
+          grep -n "usermods.add(new GameControllerUART" WLED-MM/wled00/usermods_list.cpp
+
+      - name: Create ESP32-S3 N16R8 Super Controller environment
+        run: |
+          cat > WLED-MM/platformio_override.ini <<'EOF_INI'
+          [env:ESP32-S3-N16R8-SUPER]
+          board = esp32-s3-devkitc-1
+          platform = ${esp32.platformV4}
+          platform_packages = ${esp32.platformV4_packages}
+          upload_speed = 921600
+
+          board_build.flash_mode = qio
+          board_build.arduino.memory_type = qio_opi
+          board_build.f_flash = 80000000L
+          board_build.partitions = ${esp32.extreme_partitions}
+          board_upload.flash_size = 16MB
+          board_upload.maximum_size = 16777216
+
+          build_unflags =
+            ${common.build_unflags}
+            ${Speed_Flags.build_unflags}
+
+          build_flags =
+            ${common.build_flags}
+            ${esp32s3.build_flags}
+            -Wno-misleading-indentation
+            -Wno-format-truncation
+            ${common_mm.build_flags_S}
+            ${Speed_Flags.build_flags_V4}
+            ${common_mm.animartrix_build_flags}
+            -D WLED_ENABLE_PIXART
+            -D WLED_ENABLE_PIXELFORGE
+            -D WLED_MAX_USERMODS=12
+            -D WLED_RELEASE_NAME=ESP32-S3-N16R8-SUPER
+            -D BOARD_HAS_PSRAM
+            -D WLED_USE_PSRAM_JSON
+            -D ALL_JSON_TO_PSRAM
+            -D ARDUINO_USB_MODE=1
+            -D ARDUINO_USB_CDC_ON_BOOT=0
+            -D ARDUINO_USB_MSC_ON_BOOT=0
+            -D ARDUINO_USB_DFU_ON_BOOT=0
+            -D WLED_DISABLE_ALEXA
+            -D WLED_DISABLE_HUESYNC
+            -D WLED_DISABLE_MQTT
+            -D WLED_DISABLE_LOXONE
+            -D WLED_DISABLE_INFRARED
+            -D WLED_DISABLE_ADALIGHT
+            -D LEDPIN=16
+            -D BTNPIN=0
+            -D RLYPIN=-1
+            -D IRPIN=-1
+            -D AUDIOPIN=-1
+            -D SR_DMTYPE=1
+            -D I2S_SDPIN=14
+            -D I2S_CKPIN=12
+            -D I2S_WSPIN=13
+            -D MCLK_PIN=-1
+
+          lib_deps =
+            ${esp32s3.lib_deps}
+            ${common_mm.lib_deps_S}
+            ${common_mm.animartrix_lib_deps}
+
+          lib_ignore = IRremoteESP8266
+          monitor_filters = esp32_exception_decoder
+          EOF_INI
+
+      - name: Show build configuration
+        run: cat WLED-MM/platformio_override.ini
+
+      - name: Build S3 Super Controller
+        working-directory: WLED-MM
+        run: pio run -e ESP32-S3-N16R8-SUPER
+
+      - name: Collect firmware
+        run: |
+          mkdir -p output
+          BUILD=WLED-MM/.pio/build/ESP32-S3-N16R8-SUPER
+          cp "$BUILD/firmware.bin" output/ESP32-S3-N16R8-SuperController-firmware.bin
+          cp "$BUILD/bootloader.bin" output/bootloader.bin
+          cp "$BUILD/partitions.bin" output/partitions.bin
+          if [ -f "$BUILD/firmware.elf" ]; then
+            cp "$BUILD/firmware.elf" output/firmware.elf
+          fi
+          cat > output/FLASHING.txt <<'FLASH'
+          ESP32-S3 N16R8 Super Controller
+
+          Hardware defaults compiled into this build:
+          - LED data: GPIO16
+          - Game controller UART RX: GPIO18 @ 115200
+          - INMP441 SD: GPIO14
+          - INMP441 SCK/BCLK: GPIO12
+          - INMP441 WS/LRCLK: GPIO13
+          - INMP441 L/R: GND
+          - INMP441 power: 3.3V
+
+          Controller preset transitions:
+          - Presets 9-12: 0 ms hard cut
+          - All other presets: 700 ms one-shot transition
+
+          firmware.bin is suitable for OTA after WLED is already installed.
+          For a fresh/blank board, use the normal ESP32-S3 bootloader + partition
+          flashing process rather than writing firmware.bin at address 0x0.
+          FLASH
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ESP32-S3-N16R8-SuperController
+          path: output/
+          if-no-files-found: error
