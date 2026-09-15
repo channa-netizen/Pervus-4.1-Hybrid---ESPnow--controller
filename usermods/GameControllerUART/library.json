@@ -1,0 +1,8 @@
+{
+  "name": "GameControllerUART",
+  "version": "2.0.0",
+  "description": "UART performance controller bridge for MoonModules WLED",
+  "keywords": ["wled", "uart", "controller", "performance"],
+  "frameworks": ["arduino"],
+  "platforms": ["espressif32"]
+}
